@@ -51,13 +51,22 @@
  * xt_hifi4.h, so the header check keeps that build on the scalar fallback;
  * an xt-clang/XCC build for the ace30 core has both and takes the SIMD path.
  */
-#if defined(__has_include) && \
+/*
+ * Gate on __XCC__: only the genuine Cadence toolchain (XCC / Cadence xt-clang)
+ * actually provides the float SIMD types (xtfloatx2, XT_MUL_SX2, ...). The
+ * upstream LLVM Xtensa clang ships an xt_hifiN.h WRAPPER but NOT those types
+ * (its <xtensahifiintrin.h> is fixed-point ae_* only), and it scalarises float
+ * vectors to scalar mul.s -- so LLVM clang and GCC both take the scalar
+ * fallback. Without the __XCC__ guard a clang build would wrongly enter the
+ * intrinsic branch via __has_include(xt_hifi4.h) and fail on xtfloatx2.
+ */
+#if defined(__XCC__) && defined(__has_include) && \
     defined(XCHAL_HAVE_HIFI5) && XCHAL_HAVE_HIFI5 && \
     defined(XCHAL_HAVE_HIFI5_VFPU) && XCHAL_HAVE_HIFI5_VFPU && \
     __has_include(<xtensa/tie/xt_hifi5.h>)
 #  include <xtensa/tie/xt_hifi5.h>
 #  define FF_XTENSA_HIFI_FLOAT 1
-#elif defined(__has_include) && \
+#elif defined(__XCC__) && defined(__has_include) && \
     defined(XCHAL_HAVE_HIFI4) && XCHAL_HAVE_HIFI4 && \
     defined(XCHAL_HAVE_HIFI4_VFPU) && XCHAL_HAVE_HIFI4_VFPU && \
     __has_include(<xtensa/tie/xt_hifi4.h>)
