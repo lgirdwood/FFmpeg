@@ -2152,6 +2152,7 @@ ARCH_LIST="
     x86
     x86_32
     x86_64
+    xtensa
 "
 
 ARCH_EXT_LIST_ARM="
@@ -5293,6 +5294,9 @@ case "$arch" in
     i[3-6]86*|i86pc|BePC|x86pc|x86_64|x86_32|amd64)
         arch="x86"
     ;;
+    xtensa*)
+        arch="xtensa"
+    ;;
 esac
 
 is_in $arch $ARCH_LIST || warn "unknown architecture $arch"
@@ -5713,6 +5717,9 @@ case "$arch" in
             enabled shared && enable_weak pic
             objformat=elf64
         fi
+    ;;
+    xtensa)
+        enabled shared && enable_weak pic
     ;;
 esac
 
