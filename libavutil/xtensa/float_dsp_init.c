@@ -21,16 +21,23 @@
 
 /*
  * These kernels back the AVFloatDSPContext used for AAC/MP3/Opus windowing and
- * overlap-add (see the SOF ffmpeg_dec HIFI.md analysis). They use the Cadence
- * single-precision float SIMD (xtfloatx2, 2 lanes), which requires a HiFi core
- * with the VFPU option (e.g. Intel ace30/ptl: HiFi4 + XCHAL_HAVE_HIFI4_VFPU).
+ * overlap-add (see the SOF ffmpeg_dec HIFI.md analysis). They come in two SIMD
+ * flavours, selected by the toolchain:
  *
- * The intrinsic path is compiled only when the toolchain exposes the Xtensa
- * core config (XCHAL_* via <xtensa/config/core-isa.h>) AND that core has a
- * float VFPU -- i.e. an xt-clang/XCC build for a HiFi4/5-VFPU core. Under the
- * generic Zephyr-SDK GCC cross-build the core config is not on the include path,
- * so FF_XTENSA_HIFI_FLOAT is 0, this file adds nothing, and float_dsp.c keeps
- * its portable scalar C kernels. Correctness is identical either way.
+ *  - Cadence XCC / xt-clang: the native single-precision float SIMD
+ *    (xtfloatx2, 2 lanes) via XT_MUL_SX2 / XT_MADD_SX2, on any HiFi core with
+ *    the float VFPU option (ace30/ptl HiFi4, ace40 HiFi5).
+ *
+ *  - Upstream LLVM Xtensa clang: the HiFi5 4-wide packed-float ops
+ *    (XT_MUL_SX2X2 / XT_MADD_SX2X2, a v2f32 register pair, dual output) added
+ *    to our backend. LLVM clang has no xtfloatx2 memory ops, so packed values
+ *    are moved as ae_int32x2 (AE_L32X2_IP / AE_S32X2_IP) and reinterpreted in
+ *    registers by the .sx2x2 builtins. Needs -mcpu=intel_ace40 (HiFi5 VFPU).
+ *
+ * Under the Zephyr-SDK GCC cross-build neither the intrinsics header nor the
+ * core config is on the include path, so both FF_XTENSA_HIFI_FLOAT* are 0, this
+ * file adds nothing, and float_dsp.c keeps its portable scalar C kernels.
+ * Correctness is identical in every case.
  */
 
 #include <stdint.h>
@@ -45,20 +52,15 @@
 #endif
 
 /*
- * Take the SIMD path only when the toolchain provides BOTH the core config
- * (reporting a float-VFPU HiFi core) AND the matching Cadence intrinsics header.
- * The Zephyr-SDK GCC ships a core-isa.h with XCHAL_HAVE_HIFI4=1 but NOT
- * xt_hifi4.h, so the header check keeps that build on the scalar fallback;
- * an xt-clang/XCC build for the ace30 core has both and takes the SIMD path.
- */
-/*
- * Gate on __XCC__: only the genuine Cadence toolchain (XCC / Cadence xt-clang)
- * actually provides the float SIMD types (xtfloatx2, XT_MUL_SX2, ...). The
- * upstream LLVM Xtensa clang ships an xt_hifiN.h WRAPPER but NOT those types
- * (its <xtensahifiintrin.h> is fixed-point ae_* only), and it scalarises float
- * vectors to scalar mul.s -- so LLVM clang and GCC both take the scalar
- * fallback. Without the __XCC__ guard a clang build would wrongly enter the
- * intrinsic branch via __has_include(xt_hifi4.h) and fail on xtfloatx2.
+ * Path selection, most specific first:
+ *  1. XCC HiFi5/HiFi4 VFPU -> native 2-lane xtfloatx2 (FF_XTENSA_HIFI_FLOAT).
+ *  2. LLVM Xtensa clang with the HiFi5 .sx2x2 builtins AND an ace40 core config
+ *     -> 4-wide packed float (FF_XTENSA_HIFI_FLOAT_LLVM).
+ *  3. anything else -> scalar C fallback.
+ *
+ * The __XCC__ guard keeps the LLVM clang out of the Cadence branch (its
+ * xt_hifiN.h is a fixed-point ae_* wrapper with no xtfloatx2), and the
+ * __has_builtin guard keeps GCC out of the LLVM branch.
  */
 #if defined(__XCC__) && defined(__has_include) && \
     defined(XCHAL_HAVE_HIFI5) && XCHAL_HAVE_HIFI5 && \
@@ -72,11 +74,17 @@
     __has_include(<xtensa/tie/xt_hifi4.h>)
 #  include <xtensa/tie/xt_hifi4.h>
 #  define FF_XTENSA_HIFI_FLOAT 1
-#else
-#  define FF_XTENSA_HIFI_FLOAT 0
+#elif !defined(__XCC__) && defined(__has_builtin) && \
+    __has_builtin(__builtin_xtensa_mul_sx2x2) && \
+    defined(XCHAL_HAVE_HIFI5_VFPU) && XCHAL_HAVE_HIFI5_VFPU && \
+    defined(__has_include) && __has_include(<xtensahifiintrin.h>)
+#  include <xtensahifiintrin.h>
+#  define FF_XTENSA_HIFI_FLOAT_LLVM 1
 #endif
 
-#if FF_XTENSA_HIFI_FLOAT
+/* ------------------------------------------------------------------------- */
+#if defined(FF_XTENSA_HIFI_FLOAT)   /* Cadence XCC: native 2-lane xtfloatx2   */
+/* ------------------------------------------------------------------------- */
 
 #define FF_XT_V (int)sizeof(xtfloatx2)   /* 8: two floats per SIMD vector */
 
@@ -168,11 +176,132 @@ static void vector_fmul_add_xtensa(float *dst, const float *src0,
         dst[len - 1] = src0[len - 1] * src1[len - 1] + src2[len - 1];
 }
 
-#endif /* FF_XTENSA_HIFI_FLOAT */
+/* ------------------------------------------------------------------------- */
+#elif defined(FF_XTENSA_HIFI_FLOAT_LLVM)  /* LLVM clang: HiFi5 4-wide .sx2x2  */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * .sx2x2 processes a v2f32 register pair (4 floats) per op, dual-output:
+ *   MUL_SX2X2 (a,b, c,d,e,f):  a = c*e, b = d*f     (lanewise, verified on
+ *   MADD_SX2X2(a,b, c,d,e,f):  a += c*e, b += d*f    the HiFi5 xt-run sim)
+ * The LLVM backend has no xtfloatx2 memory op, so 8-byte pairs move as
+ * ae_int32x2 (raw bits) and the .sx2x2 builtins reinterpret them as v2f32 in
+ * registers -- no scalar float touches memory. Loops step 4 floats (2 pairs).
+ */
+
+#define FF_XT_V 8                        /* bytes per ae_int32x2 pair (2 floats) */
+
+/* Broadcast a scalar to both lanes of a packed pair (raw-bits ae_int32x2). */
+static av_always_inline ae_int32x2 ff_xt_splat(float mul)
+{
+    float __attribute__((aligned(8))) mm[2] = { mul, mul };
+    return AE_L32X2_I((const ae_int32x2 *)mm, 0);
+}
+
+/* dst[i] = src0[i] * src1[i] */
+static void vector_fmul_xtensa(float *dst, const float *src0,
+                               const float *src1, int len)
+{
+    ae_int32x2 *p0 = (ae_int32x2 *)src0;
+    ae_int32x2 *p1 = (ae_int32x2 *)src1;
+    ae_int32x2 *pd = (ae_int32x2 *)dst;
+    ae_int32x2 c, d, e, f;
+    ae_xtfloatx2 a, b;
+    int i;
+
+    for (i = 0; i + 4 <= len; i += 4) {
+        AE_L32X2_IP(c, p0, FF_XT_V);
+        AE_L32X2_IP(d, p0, FF_XT_V);
+        AE_L32X2_IP(e, p1, FF_XT_V);
+        AE_L32X2_IP(f, p1, FF_XT_V);
+        XT_MUL_SX2X2(a, b, c, d, e, f);   /* a=c*e, b=d*f */
+        AE_S32X2_IP(a, pd, FF_XT_V);
+        AE_S32X2_IP(b, pd, FF_XT_V);
+    }
+    for (; i < len; i++)
+        dst[i] = src0[i] * src1[i];
+}
+
+/* dst[i] = src[i] * mul */
+static void vector_fmul_scalar_xtensa(float *dst, const float *src,
+                                      float mul, int len)
+{
+    ae_int32x2 *ps = (ae_int32x2 *)src;
+    ae_int32x2 *pd = (ae_int32x2 *)dst;
+    ae_int32x2 vmul = ff_xt_splat(mul);
+    ae_int32x2 c, d;
+    ae_xtfloatx2 a, b;
+    int i;
+
+    for (i = 0; i + 4 <= len; i += 4) {
+        AE_L32X2_IP(c, ps, FF_XT_V);
+        AE_L32X2_IP(d, ps, FF_XT_V);
+        XT_MUL_SX2X2(a, b, c, d, vmul, vmul);
+        AE_S32X2_IP(a, pd, FF_XT_V);
+        AE_S32X2_IP(b, pd, FF_XT_V);
+    }
+    for (; i < len; i++)
+        dst[i] = src[i] * mul;
+}
+
+/* dst[i] += src[i] * mul */
+static void vector_fmac_scalar_xtensa(float *dst, const float *src,
+                                      float mul, int len)
+{
+    ae_int32x2 *ps  = (ae_int32x2 *)src;
+    ae_int32x2 *pdl = (ae_int32x2 *)dst;
+    ae_int32x2 *pds = (ae_int32x2 *)dst;
+    ae_int32x2 vmul = ff_xt_splat(mul);
+    ae_int32x2 c, d;
+    ae_xtfloatx2 a, b;                    /* accumulators = current dst pairs */
+    int i;
+
+    for (i = 0; i + 4 <= len; i += 4) {
+        AE_L32X2_IP(a, pdl, FF_XT_V);
+        AE_L32X2_IP(b, pdl, FF_XT_V);
+        AE_L32X2_IP(c, ps, FF_XT_V);
+        AE_L32X2_IP(d, ps, FF_XT_V);
+        XT_MADD_SX2X2(a, b, c, d, vmul, vmul);   /* a += c*mul, b += d*mul */
+        AE_S32X2_IP(a, pds, FF_XT_V);
+        AE_S32X2_IP(b, pds, FF_XT_V);
+    }
+    for (; i < len; i++)
+        dst[i] += src[i] * mul;
+}
+
+/* dst[i] = src0[i] * src1[i] + src2[i] */
+static void vector_fmul_add_xtensa(float *dst, const float *src0,
+                                   const float *src1, const float *src2,
+                                   int len)
+{
+    ae_int32x2 *p0 = (ae_int32x2 *)src0;
+    ae_int32x2 *p1 = (ae_int32x2 *)src1;
+    ae_int32x2 *p2 = (ae_int32x2 *)src2;
+    ae_int32x2 *pd = (ae_int32x2 *)dst;
+    ae_int32x2 c, d, e, f;
+    ae_xtfloatx2 a, b;                    /* accumulators = src2 pairs */
+    int i;
+
+    for (i = 0; i + 4 <= len; i += 4) {
+        AE_L32X2_IP(a, p2, FF_XT_V);
+        AE_L32X2_IP(b, p2, FF_XT_V);
+        AE_L32X2_IP(c, p0, FF_XT_V);
+        AE_L32X2_IP(d, p0, FF_XT_V);
+        AE_L32X2_IP(e, p1, FF_XT_V);
+        AE_L32X2_IP(f, p1, FF_XT_V);
+        XT_MADD_SX2X2(a, b, c, d, e, f);  /* a += c*e, b += d*f */
+        AE_S32X2_IP(a, pd, FF_XT_V);
+        AE_S32X2_IP(b, pd, FF_XT_V);
+    }
+    for (; i < len; i++)
+        dst[i] = src0[i] * src1[i] + src2[i];
+}
+
+#endif /* SIMD kernel selection */
 
 av_cold void ff_float_dsp_init_xtensa(AVFloatDSPContext *fdsp)
 {
-#if FF_XTENSA_HIFI_FLOAT
+#if defined(FF_XTENSA_HIFI_FLOAT) || defined(FF_XTENSA_HIFI_FLOAT_LLVM)
     fdsp->vector_fmul        = vector_fmul_xtensa;
     fdsp->vector_fmul_scalar = vector_fmul_scalar_xtensa;
     fdsp->vector_fmac_scalar = vector_fmac_scalar_xtensa;
