@@ -1185,22 +1185,41 @@ static av_cold int init_dsp(AVCodecContext *avctx)
     if (ret < 0)                                                             \
         return ret
 
+    MDCT_INIT(ac->mdct128,  ac->mdct128_fn,   128, 1.0/128);
+    /* mdct512 is used ONLY by imdct_and_windowing_ld / _eld (AAC-LD / ELD
+     * profiles); standard AAC-LC (1024 long / 128 short) never builds a
+     * 512-sample frame, so skip its ~220ms av_tx table init for the LC build. */
+#ifndef SOF_AAC_LC_ONLY
+    MDCT_INIT(ac->mdct512,  ac->mdct512_fn,   512, 1.0/512);
+#endif
+    MDCT_INIT(ac->mdct1024, ac->mdct1024_fn, 1024, 1.0/1024);
+#ifndef SOF_AAC_LC_ONLY
+    /* The non-power-of-two MDCTs (960/480/120 LD frame-lengths, 96/768 other
+     * profiles) are never used by standard AAC-LC (1024/128 frames).  Each
+     * factors to a 3- or 15-point naive DFT leaf built from double cos()/sin()
+     * that is NOT on the hardcoded 2*pi/16384 twiddle grid, costing ~2.6s of
+     * soft-float at avcodec_open2() on the SOF DSP.  Skip for the LC build. */
     MDCT_INIT(ac->mdct96,   ac->mdct96_fn,     96, 1.0/96);
     MDCT_INIT(ac->mdct120,  ac->mdct120_fn,   120, 1.0/120);
-    MDCT_INIT(ac->mdct128,  ac->mdct128_fn,   128, 1.0/128);
     MDCT_INIT(ac->mdct480,  ac->mdct480_fn,   480, 1.0/480);
-    MDCT_INIT(ac->mdct512,  ac->mdct512_fn,   512, 1.0/512);
     MDCT_INIT(ac->mdct768,  ac->mdct768_fn,   768, 1.0/768);
     MDCT_INIT(ac->mdct960,  ac->mdct960_fn,   960, 1.0/960);
-    MDCT_INIT(ac->mdct1024, ac->mdct1024_fn, 1024, 1.0/1024);
+#endif
 #undef MDCT_INIT
 
-    /* LTP forward MDCT */
+    /* LTP forward MDCT.  Long Term Prediction is an AAC-Main/LTP-profile tool;
+     * a standard AAC-LC stream never sets ics.ltp.present, so apply_ltp() (the
+     * only caller of mdct_ltp_fn) never runs.  This is also the ONLY forward
+     * (inv=0) MDCT the AAC decoder builds; its av_tx table-gen path is not
+     * exercised by the LC decode path (which uses inverse MDCTs only).  Skip it
+     * for the LC build. */
+#ifndef SOF_AAC_LC_ONLY
     scale_fixed = -1.0;
     scale_float = -32786.0*2 + 36;
     ret = av_tx_init(&ac->mdct_ltp, &ac->mdct_ltp_fn, tx_type, 0, 1024, scalep, 0);
     if (ret < 0)
         return ret;
+#endif
 
     return 0;
 }

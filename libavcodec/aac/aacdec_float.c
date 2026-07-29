@@ -40,8 +40,11 @@
 #include "libavcodec/aactab.h"
 #include "libavcodec/sinewin.h"
 #include "libavcodec/kbdwin.h"
+#include <string.h>
+#include "aac_kbd_hardcoded.h"
 #include "libavcodec/cbrt_data.h"
 #include "libavutil/mathematics.h"
+#include "libavutil/log.h"
 #include "libavcodec/aacsbr.h"
 
 DECLARE_ALIGNED(32, static float, sine_96)[96];
@@ -57,11 +60,15 @@ static void init_tables_float_fn(void)
 {
     ff_cbrt_tableinit();
 
-    ff_kbd_window_init(ff_aac_kbd_long_1024, 4.0, 1024);
-    ff_kbd_window_init(ff_aac_kbd_short_128, 6.0, 128);
+    /* Hardcoded at build time: runtime ff_kbd_window_init() spends ~15s in
+     * soft-float double av_bessel_i0() at avcodec_open2() on the SOF DSP.
+     * Values are IEEE-identical (rational approximation + correctly-rounded
+     * sqrt). See aac_kbd_hardcoded.h. */
+    memcpy(ff_aac_kbd_long_1024, hc_aac_kbd_long_1024, sizeof(hc_aac_kbd_long_1024));
+    memcpy(ff_aac_kbd_short_128, hc_aac_kbd_short_128, sizeof(hc_aac_kbd_short_128));
 
-    ff_kbd_window_init(aac_kbd_long_960, 4.0, 960);
-    ff_kbd_window_init(aac_kbd_short_120, 6.0, 120);
+    memcpy(aac_kbd_long_960, hc_aac_kbd_long_960, sizeof(hc_aac_kbd_long_960));
+    memcpy(aac_kbd_short_120, hc_aac_kbd_short_120, sizeof(hc_aac_kbd_short_120));
 
     ff_sine_window_init(sine_960, 960);
     ff_sine_window_init(sine_120, 120);

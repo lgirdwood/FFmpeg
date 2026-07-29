@@ -71,10 +71,23 @@ av_cold int AAC_RENAME(ff_aac_sbr_ctx_alloc_init)(AACDecContext *ac,
                                                   ChannelElement **che, int id_aac)
 {
     SpectralBandReplication *sbr;
-    ExtChannelElement *ext = av_mallocz(sizeof(*ext));
+    ExtChannelElement *ext;
     int ret;
     float scale;
 
+#ifdef SOF_AAC_LC_ONLY
+    /* SOF decodes AAC-LC only: SBR (HE-AAC), parametric stereo and AAC-Main
+     * prediction are never exercised, so the SBR/PS/predictor storage in
+     * ExtChannelElement (~437 KiB of a ~554 KiB element) is pure waste on the
+     * DSP heap. Allocate just the ChannelElement; sbr_apply/sbr_decode_extension
+     * and apply_prediction (AOT_AAC_MAIN-gated) are never called for LC, so
+     * get_sbr() and predictor_state are never dereferenced. */
+    *che = av_mallocz(sizeof(ChannelElement));
+    if (!*che)
+        return AVERROR(ENOMEM);
+    return 0;
+#endif
+    ext = av_mallocz(sizeof(*ext));
     if (!ext)
         return AVERROR(ENOMEM);
     *che = &ext->ch;
@@ -114,9 +127,14 @@ av_cold int AAC_RENAME(ff_aac_sbr_ctx_alloc_init)(AACDecContext *ac,
 
 av_cold void AAC_RENAME(ff_aac_sbr_ctx_close)(ChannelElement *che)
 {
+#ifdef SOF_AAC_LC_ONLY
+    /* LC-only element carries no embedded SBR ctx (see alloc_init). */
+    return;
+#else
     SpectralBandReplication *sbr = get_sbr(che);
     av_tx_uninit(&sbr->mdct);
     av_tx_uninit(&sbr->mdct_ana);
+#endif
 }
 
 static int qsort_comparison_function_int16(const void *a, const void *b)

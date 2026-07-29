@@ -35,6 +35,8 @@
 #include "libavutil/mem_internal.h"
 #include "libavutil/thread.h"
 #include "aactab.h"
+#include <string.h>
+#include "aac/aac_kbd_hardcoded.h"
 
 #if CONFIG_AAC_ENCODER || CONFIG_AAC_DECODER
 #include "kbdwin.h"
@@ -94,8 +96,10 @@ static av_cold void aac_float_common_init(void)
 {
     aac_tableinit();
 
-    ff_kbd_window_init(ff_aac_kbd_long_1024, 4.0, 1024);
-    ff_kbd_window_init(ff_aac_kbd_short_128, 6.0, 128);
+    /* Hardcoded at build time (see aac_kbd_hardcoded.h) to skip ~15s of
+     * soft-float double av_bessel_i0() at avcodec_open2() on the SOF DSP. */
+    memcpy(ff_aac_kbd_long_1024, hc_aac_kbd_long_1024, sizeof(hc_aac_kbd_long_1024));
+    memcpy(ff_aac_kbd_short_128, hc_aac_kbd_short_128, sizeof(hc_aac_kbd_short_128));
     ff_init_ff_sine_windows(10);
     ff_init_ff_sine_windows(7);
 }
