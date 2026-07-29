@@ -24,6 +24,12 @@
 #include "bprint.h"
 
 #include "tx_priv.h"
+#include "tx_cold_trig.h"
+
+/* SOF: build-time cosine master table backing ff_sof_tx_cos/sin. */
+const double ff_sof_tx_master_cos[SOF_TX_TRIG_MASTER/4 + 1] = {
+#include "tx_cold_trig_data.h"
+};
 
 #define TYPE_IS(type, x)               \
     (((x) == AV_TX_FLOAT_ ## type)  || \

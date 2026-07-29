@@ -25,6 +25,23 @@
  */
 
 #include "mem.h"
+#include "tx_cold_trig.h"
+
+/* SOF: generate the float-transform cold tables in HW single precision; the
+ * int32/double instantiations keep full-precision double. See tx_cold_trig.h. */
+#ifdef TX_FLOAT
+#define SOF_REAL     float
+#define SOF_COS(x)   ff_sof_tx_cosf(x)
+#define SOF_SIN(x)   ff_sof_tx_sinf(x)
+#define SOF_SQRT(x)  sqrtf(x)
+#define SOF_FABS(x)  fabsf(x)
+#else
+#define SOF_REAL     double
+#define SOF_COS(x)   ff_sof_tx_cos(x)
+#define SOF_SIN(x)   ff_sof_tx_sin(x)
+#define SOF_SQRT(x)  sqrt(x)
+#define SOF_FABS(x)  fabs(x)
+#endif
 
 #define TABLE_DEF(name, size) \
     DECLARE_ALIGNED(32, TXSample, TX_TAB(ff_tx_tab_ ##name))[size]
@@ -62,11 +79,11 @@ typedef struct FFTabInitData {
 #define SR_TABLE(len)                                              \
 static av_cold void TX_TAB(ff_tx_init_tab_ ##len)(void)            \
 {                                                                  \
-    double freq = 2*M_PI/len;                                      \
+    SOF_REAL freq = 2*(SOF_REAL)M_PI/len;                                      \
     TXSample *tab = TX_TAB(ff_tx_tab_ ##len);                      \
                                                                    \
     for (int i = 0; i < len/4; i++)                                \
-        *tab++ = RESCALE(cos(i*freq));                             \
+        *tab++ = RESCALE(SOF_COS(i*freq));                             \
                                                                    \
     *tab = 0;                                                      \
 }
@@ -1636,12 +1653,12 @@ static av_cold int TX_NAME(ff_tx_rdft_init)(AVTXContext *s,
     *tab++ = RESCALE(-(0.5 - inv) * m);
 
     for (int i = 0; i < len4; i++)
-        *tab++ = RESCALE(cos(i*f));
+        *tab++ = RESCALE(ff_sof_tx_cos(i*f));
 
     tab = ((TXSample *)s->exp) + len4 + 8;
 
     for (int i = 0; i < len4; i++)
-        *tab++ = RESCALE(cos(((len - i*4)/4.0)*f)) * (inv ? 1 : -1);
+        *tab++ = RESCALE(ff_sof_tx_cos(((len - i*4)/4.0)*f)) * (inv ? 1 : -1);
 
     return 0;
 }
@@ -1853,14 +1870,14 @@ static av_cold int TX_NAME(ff_tx_dct_init)(AVTXContext *s,
     freq = M_PI/(len*2);
 
     for (int i = 0; i < len; i++)
-        tab[i] = RESCALE(cos(i*freq)*(!inv + 1));
+        tab[i] = RESCALE(ff_sof_tx_cos(i*freq)*(!inv + 1));
 
     if (inv) {
         for (int i = 0; i < len/2; i++)
-            tab[len + i] = RESCALE(0.5 / sin((2*i + 1)*freq));
+            tab[len + i] = RESCALE(0.5 / ff_sof_tx_sin((2*i + 1)*freq));
     } else {
         for (int i = 0; i < len/2; i++)
-            tab[len + i] = RESCALE(cos((len - 2*i - 1)*freq));
+            tab[len + i] = RESCALE(ff_sof_tx_cos((len - 2*i - 1)*freq));
     }
 
     return 0;
@@ -2102,22 +2119,22 @@ int TX_TAB(ff_tx_mdct_gen_exp)(AVTXContext *s, int *pre_tab)
 {
     int off = 0;
     int len4 = s->len >> 1;
-    double scale = s->scale_d;
-    const double theta = (scale < 0 ? len4 : 0) + 1.0/8.0;
+    SOF_REAL scale = s->scale_d;
+    const SOF_REAL theta = (scale < 0 ? len4 : 0) + (SOF_REAL)(1.0/8.0);
     size_t alloc = pre_tab ? 2*len4 : len4;
 
     if (!(s->exp = av_malloc_array(alloc, sizeof(*s->exp))))
         return AVERROR(ENOMEM);
 
-    scale = sqrt(fabs(scale));
+    scale = SOF_SQRT(SOF_FABS(scale));
 
     if (pre_tab)
         off = len4;
 
     for (int i = 0; i < len4; i++) {
-        const double alpha = M_PI_2 * (i + theta) / len4;
-        s->exp[off + i] = (TXComplex){ RESCALE(cos(alpha) * scale),
-                                       RESCALE(sin(alpha) * scale) };
+        const SOF_REAL alpha = (SOF_REAL)M_PI_2 * (i + theta) / len4;
+        s->exp[off + i] = (TXComplex){ RESCALE(SOF_COS(alpha) * scale),
+                                       RESCALE(SOF_SIN(alpha) * scale) };
     }
 
     if (pre_tab)
