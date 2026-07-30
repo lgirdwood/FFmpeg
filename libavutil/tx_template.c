@@ -27,6 +27,10 @@
 #include "mem.h"
 #include "tx_cold_trig.h"
 
+/* SOF: HiFi4 VFPU packed-complex FFT/MDCT primitives (float instantiation only;
+ * self-gated on the aphid HiFi4-VFPU LLVM toolchain, inert everywhere else). */
+#include "xtensa/tx_vfpu.h"
+
 /* SOF: generate the float-transform cold tables in HW single precision; the
  * int32/double instantiations keep full-precision double. See tx_cold_trig.h. */
 #ifdef TX_FLOAT
@@ -576,6 +580,9 @@ DECL_FACTOR_S(15)
 static inline void TX_NAME(ff_tx_fft_sr_combine)(TXComplex *z,
                                                  const TXSample *cos, int len)
 {
+#if defined(FF_TX_XTENSA_VFPU) && defined(TX_FLOAT)
+    ff_tx_vfpu_sr_combine(z, cos, len);
+#else
     int o1 = 2*len;
     int o2 = 4*len;
     int o3 = 6*len;
@@ -597,6 +604,7 @@ static inline void TX_NAME(ff_tx_fft_sr_combine)(TXComplex *z,
         cos += 2*4;
         wim -= 2*4;
     }
+#endif
 }
 
 static av_cold int TX_NAME(ff_tx_fft_sr_codelet_init)(AVTXContext *s,
@@ -647,11 +655,15 @@ static void TX_NAME(ff_tx_fft2_ns)(AVTXContext *s, void *_dst,
 {
     TXComplex *src = _src;
     TXComplex *dst = _dst;
+#if defined(FF_TX_XTENSA_VFPU) && defined(TX_FLOAT)
+    ff_tx_vfpu_fft2(dst, src);
+#else
     TXComplex tmp;
 
     BF(tmp.re, dst[0].re, src[0].re, src[1].re);
     BF(tmp.im, dst[0].im, src[0].im, src[1].im);
     dst[1] = tmp;
+#endif
 }
 
 static void TX_NAME(ff_tx_fft4_ns)(AVTXContext *s, void *_dst,
@@ -659,6 +671,9 @@ static void TX_NAME(ff_tx_fft4_ns)(AVTXContext *s, void *_dst,
 {
     TXComplex *src = _src;
     TXComplex *dst = _dst;
+#if defined(FF_TX_XTENSA_VFPU) && defined(TX_FLOAT)
+    ff_tx_vfpu_fft4(dst, src);
+#else
     TXSample t1, t2, t3, t4, t5, t6, t7, t8;
 
     BF(t3, t1, src[0].re, src[1].re);
@@ -669,6 +684,7 @@ static void TX_NAME(ff_tx_fft4_ns)(AVTXContext *s, void *_dst,
     BF(dst[3].im, dst[1].im, t4, t8);
     BF(dst[3].re, dst[1].re, t3, t7);
     BF(dst[2].im, dst[0].im, t2, t5);
+#endif
 }
 
 static void TX_NAME(ff_tx_fft8_ns)(AVTXContext *s, void *_dst,
@@ -676,6 +692,9 @@ static void TX_NAME(ff_tx_fft8_ns)(AVTXContext *s, void *_dst,
 {
     TXComplex *src = _src;
     TXComplex *dst = _dst;
+#if defined(FF_TX_XTENSA_VFPU) && defined(TX_FLOAT)
+    ff_tx_vfpu_fft8(dst, src, TX_TAB(ff_tx_tab_8)[1]);
+#else
     TXUSample t1, t2, t3, t4, t5, t6, r0, i0, r1, i1;
     const TXSample cos = TX_TAB(ff_tx_tab_8)[1];
 
@@ -688,6 +707,7 @@ static void TX_NAME(ff_tx_fft8_ns)(AVTXContext *s, void *_dst,
 
     BUTTERFLIES(dst[0], dst[2], dst[4], dst[6]);
     TRANSFORM(dst[1], dst[3], dst[5], dst[7], cos, cos);
+#endif
 }
 
 static void TX_NAME(ff_tx_fft16_ns)(AVTXContext *s, void *_dst,
@@ -695,6 +715,9 @@ static void TX_NAME(ff_tx_fft16_ns)(AVTXContext *s, void *_dst,
 {
     TXComplex *src = _src;
     TXComplex *dst = _dst;
+#if defined(FF_TX_XTENSA_VFPU) && defined(TX_FLOAT)
+    ff_tx_vfpu_fft16(dst, src, TX_TAB(ff_tx_tab_8)[1], TX_TAB(ff_tx_tab_16));
+#else
     const TXSample *cos = TX_TAB(ff_tx_tab_16);
 
     TXUSample t1, t2, t3, t4, t5, t6, r0, i0, r1, i1;
@@ -715,6 +738,7 @@ static void TX_NAME(ff_tx_fft16_ns)(AVTXContext *s, void *_dst,
     TRANSFORM(dst[ 2], dst[ 6], dst[10], dst[14], cos_16_2, cos_16_2);
     TRANSFORM(dst[ 1], dst[ 5], dst[ 9], dst[13], cos_16_1, cos_16_3);
     TRANSFORM(dst[ 3], dst[ 7], dst[11], dst[15], cos_16_3, cos_16_1);
+#endif
 }
 
 DECL_SR_CODELET_DEF(2)

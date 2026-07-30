@@ -80,6 +80,12 @@
     defined(__has_include) && __has_include(<xtensahifiintrin.h>)
 #  include <xtensahifiintrin.h>
 #  define FF_XTENSA_HIFI_FLOAT_LLVM 1
+#elif !defined(__XCC__) && defined(__has_builtin) && \
+    __has_builtin(__builtin_xtensa_mul_sx2) && \
+    defined(XCHAL_HAVE_HIFI4_VFPU) && XCHAL_HAVE_HIFI4_VFPU && \
+    defined(__has_include) && __has_include(<xtensahifiintrin.h>)
+#  include <xtensahifiintrin.h>
+#  define FF_XTENSA_HIFI_FLOAT_LLVM4 1
 #endif
 
 /* ------------------------------------------------------------------------- */
@@ -297,15 +303,156 @@ static void vector_fmul_add_xtensa(float *dst, const float *src0,
         dst[i] = src0[i] * src1[i] + src2[i];
 }
 
+/* ------------------------------------------------------------------------- */
+#elif defined(FF_XTENSA_HIFI_FLOAT_LLVM4)  /* LLVM clang: HiFi4 2-wide .sx2   */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * HiFi4 VFPU 2-wide packed float (xtfloatx2, 2 lanes) via the value-returning
+ * XT_MUL_SX2 / XT_MADD_SX2 builtins added to our LLVM backend. LLVM clang has
+ * no xtfloatx2 memory op, so 8-byte pairs move as ae_int32x2 (AE_L32X2_IP /
+ * AE_S32X2_IP, raw bits) and the .sx2 builtins reinterpret them as v2f32 in
+ * registers -- no scalar float touches memory. Loops step 2 floats (1 pair).
+ */
+
+#define FF_XT_V 8                        /* bytes per ae_int32x2 pair (2 floats) */
+
+/* Broadcast a scalar to both lanes of a packed pair (raw-bits ae_int32x2). */
+static av_always_inline ae_int32x2 ff_xt_splat(float mul)
+{
+    float __attribute__((aligned(8))) mm[2] = { mul, mul };
+    return AE_L32X2_I((const ae_int32x2 *)mm, 0);
+}
+
+/* dst[i] = src0[i] * src1[i] */
+static void vector_fmul_xtensa(float *dst, const float *src0,
+                               const float *src1, int len)
+{
+    ae_int32x2 *p0 = (ae_int32x2 *)src0;
+    ae_int32x2 *p1 = (ae_int32x2 *)src1;
+    ae_int32x2 *pd = (ae_int32x2 *)dst;
+    ae_int32x2 c, e;
+    int i;
+
+    for (i = 0; i + 2 <= len; i += 2) {
+        AE_L32X2_IP(c, p0, FF_XT_V);
+        AE_L32X2_IP(e, p1, FF_XT_V);
+        AE_S32X2_IP(XT_MUL_SX2(c, e), pd, FF_XT_V);
+    }
+    if (len & 1)
+        dst[len - 1] = src0[len - 1] * src1[len - 1];
+}
+
+/* dst[i] = src[i] * mul */
+static void vector_fmul_scalar_xtensa(float *dst, const float *src,
+                                      float mul, int len)
+{
+    ae_int32x2 *ps = (ae_int32x2 *)src;
+    ae_int32x2 *pd = (ae_int32x2 *)dst;
+    ae_int32x2 vmul = ff_xt_splat(mul);
+    ae_int32x2 c;
+    int i;
+
+    for (i = 0; i + 2 <= len; i += 2) {
+        AE_L32X2_IP(c, ps, FF_XT_V);
+        AE_S32X2_IP(XT_MUL_SX2(c, vmul), pd, FF_XT_V);
+    }
+    if (len & 1)
+        dst[len - 1] = src[len - 1] * mul;
+}
+
+/* dst[i] += src[i] * mul */
+static void vector_fmac_scalar_xtensa(float *dst, const float *src,
+                                      float mul, int len)
+{
+    ae_int32x2 *ps  = (ae_int32x2 *)src;
+    ae_int32x2 *pdl = (ae_int32x2 *)dst;
+    ae_int32x2 *pds = (ae_int32x2 *)dst;
+    ae_int32x2 vmul = ff_xt_splat(mul);
+    ae_int32x2 c, d;
+    int i;
+
+    for (i = 0; i + 2 <= len; i += 2) {
+        AE_L32X2_IP(d, pdl, FF_XT_V);      /* current dst pair = accumulator */
+        AE_L32X2_IP(c, ps, FF_XT_V);
+        AE_S32X2_IP(XT_MADD_SX2(d, c, vmul), pds, FF_XT_V);  /* d + c*vmul */
+    }
+    if (len & 1)
+        dst[len - 1] += src[len - 1] * mul;
+}
+
+/* dst[i] = src0[i] * src1[i] + src2[i] */
+static void vector_fmul_add_xtensa(float *dst, const float *src0,
+                                   const float *src1, const float *src2,
+                                   int len)
+{
+    ae_int32x2 *p0 = (ae_int32x2 *)src0;
+    ae_int32x2 *p1 = (ae_int32x2 *)src1;
+    ae_int32x2 *p2 = (ae_int32x2 *)src2;
+    ae_int32x2 *pd = (ae_int32x2 *)dst;
+    ae_int32x2 c, e, g;
+    int i;
+
+    for (i = 0; i + 2 <= len; i += 2) {
+        AE_L32X2_IP(g, p2, FF_XT_V);       /* src2 pair = accumulator */
+        AE_L32X2_IP(c, p0, FF_XT_V);
+        AE_L32X2_IP(e, p1, FF_XT_V);
+        AE_S32X2_IP(XT_MADD_SX2(g, c, e), pd, FF_XT_V);  /* g + c*e */
+    }
+    if (len & 1)
+        dst[len - 1] = src0[len - 1] * src1[len - 1] + src2[len - 1];
+}
+
+
+/* vector_fmul_window: mirrored overlap-add window (see vector_fmul_window_c).
+ * For ascending index k (0..len-1):
+ *   dst[k]           = src0[k]*win[2len-1-k] - src1[len-1-k]*win[k]
+ *   dst[2len-1-k]    = src0[k]*win[k]        + src1[len-1-k]*win[2len-1-k]
+ * The reversed operands (src1[len-1-k], win[2len-1-k]) are fetched as a
+ * contiguous pair then lane-swapped (AE_SEL32_LH(x,x) exchanges the two 32-bit
+ * halves); the mirrored output pair is lane-swapped before the descending store.
+ * Load/store are inverses, so the packed math is correct irrespective of which
+ * physical lane maps to which memory word (only the pair pairing matters). */
+static void vector_fmul_window_xtensa(float *dst, const float *src0,
+                                      const float *src1, const float *win,
+                                      int len)
+{
+    int k;
+    for (k = 0; k + 2 <= len; k += 2) {
+        ae_int32x2 A  = AE_L32X2_I((const ae_int32x2 *)(src0 + k), 0);
+        ae_int32x2 Wi = AE_L32X2_I((const ae_int32x2 *)(win  + k), 0);
+        /* contiguous reversed-side pairs (ascending in memory) */
+        ae_int32x2 Bl = AE_L32X2_I((const ae_int32x2 *)(src1 + (len - 2 - k)), 0);
+        ae_int32x2 Wl = AE_L32X2_I((const ae_int32x2 *)(win  + (2 * len - 2 - k)), 0);
+        ae_int32x2 B  = AE_SEL32_LH(Bl, Bl);   /* {src1[len-1-k],  src1[len-2-k]}  */
+        ae_int32x2 Wj = AE_SEL32_LH(Wl, Wl);   /* {win[2len-1-k],  win[2len-2-k]}  */
+        ae_int32x2 L  = XT_MSUB_SX2(XT_MUL_SX2(A, Wj), B, Wi);  /* A*Wj - B*Wi */
+        ae_int32x2 R  = XT_MADD_SX2(XT_MUL_SX2(A, Wi), B, Wj);  /* A*Wi + B*Wj */
+        AE_S32X2_I(L, (ae_int32x2 *)(dst + k), 0);
+        AE_S32X2_I(AE_SEL32_LH(R, R),
+                   (ae_int32x2 *)(dst + (2 * len - 2 - k)), 0);
+    }
+    for (; k < len; k++) {   /* scalar tail (AAC len is always even) */
+        float s0 = src0[k], s1 = src1[len - 1 - k];
+        float wi = win[k],  wj = win[2 * len - 1 - k];
+        dst[k]             = s0 * wj - s1 * wi;
+        dst[2 * len - 1 - k] = s0 * wi + s1 * wj;
+    }
+}
+
 #endif /* SIMD kernel selection */
 
 av_cold void ff_float_dsp_init_xtensa(AVFloatDSPContext *fdsp)
 {
-#if defined(FF_XTENSA_HIFI_FLOAT) || defined(FF_XTENSA_HIFI_FLOAT_LLVM)
+#if defined(FF_XTENSA_HIFI_FLOAT) || defined(FF_XTENSA_HIFI_FLOAT_LLVM) || \
+    defined(FF_XTENSA_HIFI_FLOAT_LLVM4)
     fdsp->vector_fmul        = vector_fmul_xtensa;
     fdsp->vector_fmul_scalar = vector_fmul_scalar_xtensa;
     fdsp->vector_fmac_scalar = vector_fmac_scalar_xtensa;
     fdsp->vector_fmul_add    = vector_fmul_add_xtensa;
+#if defined(FF_XTENSA_HIFI_FLOAT_LLVM4)
+    fdsp->vector_fmul_window = vector_fmul_window_xtensa;
+#endif
 #else
     (void)fdsp;   /* no VFPU / no core config: keep the scalar C kernels */
 #endif
