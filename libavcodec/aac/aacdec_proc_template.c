@@ -136,6 +136,9 @@ static int AAC_RENAME(decode_spectrum_and_dequant)(AACDecContext *ac,
                             cf = VMUL4(cf, vq, cb_idx, sf + idx);
 #endif /* USE_FIXED */
                         } while (len -= 4);
+#ifdef FF_AAC_VFPU_DEQUANT
+                        ac->fdsp->vector_fmul_scalar(cfo, cfo, sf[idx], off_len);
+#endif
                     }
                     break;
 
@@ -162,6 +165,9 @@ static int AAC_RENAME(decode_spectrum_and_dequant)(AACDecContext *ac,
                             cf = VMUL4S(cf, vq, cb_idx, bits, sf + idx);
 #endif /* USE_FIXED */
                         } while (len -= 4);
+#ifdef FF_AAC_VFPU_DEQUANT
+                        ac->fdsp->vector_fmul_scalar(cfo, cfo, sf[idx], off_len);
+#endif
                     }
                     break;
 
@@ -183,6 +189,9 @@ static int AAC_RENAME(decode_spectrum_and_dequant)(AACDecContext *ac,
                             cf = VMUL2(cf, vq, cb_idx, sf + idx);
 #endif /* USE_FIXED */
                         } while (len -= 2);
+#ifdef FF_AAC_VFPU_DEQUANT
+                        ac->fdsp->vector_fmul_scalar(cfo, cfo, sf[idx], off_len);
+#endif
                     }
                     break;
 
@@ -210,6 +219,9 @@ static int AAC_RENAME(decode_spectrum_and_dequant)(AACDecContext *ac,
                             cf = VMUL2S(cf, vq, cb_idx, sign, sf + idx);
 #endif /* USE_FIXED */
                         } while (len -= 2);
+#ifdef FF_AAC_VFPU_DEQUANT
+                        ac->fdsp->vector_fmul_scalar(cfo, cfo, sf[idx], off_len);
+#endif
                     }
                     break;
 

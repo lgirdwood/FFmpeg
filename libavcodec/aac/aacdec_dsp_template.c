@@ -203,13 +203,21 @@ static void AAC_RENAME(apply_tns)(void *_coef_param, TemporalNoiseShaping *tns,
                 // ar filter
                 for (m = 0; m < size; m++, start += inc)
                     for (i = 1; i <= FFMIN(m, order); i++)
+#ifdef FF_AAC_VFPU_DEQUANT
+                        coef[start] -= ff_vfpu_smul((INTFLOAT)coef[start - i * inc], lpc[i - 1]);
+#else
                         coef[start] -= AAC_MUL26((INTFLOAT)coef[start - i * inc], lpc[i - 1]);
+#endif
             } else {
                 // ma filter
                 for (m = 0; m < size; m++, start += inc) {
                     tmp[0] = coef[start];
                     for (i = 1; i <= FFMIN(m, order); i++)
+#ifdef FF_AAC_VFPU_DEQUANT
+                        coef[start] += ff_vfpu_smul(tmp[i], lpc[i - 1]);
+#else
                         coef[start] += AAC_MUL26(tmp[i], lpc[i - 1]);
+#endif
                     for (i = order; i > 0; i--)
                         tmp[i] = tmp[i - 1];
                 }

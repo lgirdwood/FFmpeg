@@ -1357,15 +1357,43 @@ static void TX_NAME(ff_tx_mdct_inv)(AVTXContext *s, void *_dst, void *_src,
     in1 = src;
     in2 = src + ((len2*2) - 1) * stride;
 
+#if defined(FF_TX_XTENSA_VFPU) && defined(TX_FLOAT)
+    /* HiFi4 VFPU: packed complex multiply replaces soft-float CMUL3. */
+    for (int i = 0; i < len2; i++) {
+        int k = sub_map[i];
+        ffcx tmp = ff_cx_set(in2[-k*stride], in1[k*stride]);
+        ff_cx_store(&z[i], ff_cmul(tmp, exp[i].re, exp[i].im));
+    }
+#else
     for (int i = 0; i < len2; i++) {
         int k = sub_map[i];
         TXComplex tmp = { in2[-k*stride], in1[k*stride] };
         CMUL3(z[i], tmp, exp[i]);
     }
+#endif
 
     s->fn[0](&s->sub[0], z, z, sizeof(TXComplex));
 
     exp += len2;
+#if defined(FF_TX_XTENSA_VFPU) && defined(TX_FLOAT)
+    /* HiFi4 VFPU: two packed complex multiplies + lane recombine. Each ff_cmul
+     * result straddles the two output complexes, so read lanes back via a stack
+     * temp (inverse of ff_cx_set) rather than an ambiguous two-register select.
+     *   r1 = CSWAP(z[i1]) (x) (exp[i1].im,exp[i1].re) = (z[i1].re, z[i0].im)
+     *   r0 = CSWAP(z[i0]) (x) (exp[i0].im,exp[i0].re) = (z[i0].re, z[i1].im)
+     * i0 in [len4,len2), i1 in [0,len4) are disjoint => in-place is safe. */
+    for (int i = 0; i < len4; i++) {
+        const int i0 = len4 + i, i1 = len4 - i - 1;
+        ffcx a1 = FF_CSWAP(ff_cx_load(&z[i1]));
+        ffcx a0 = FF_CSWAP(ff_cx_load(&z[i0]));
+        TXComplex r1, r0;
+
+        ff_cx_store(&r1, ff_cmul(a1, exp[i1].im, exp[i1].re));
+        ff_cx_store(&r0, ff_cmul(a0, exp[i0].im, exp[i0].re));
+        z[i1].re = r1.re; z[i0].im = r1.im;
+        z[i0].re = r0.re; z[i1].im = r0.im;
+    }
+#else
     for (int i = 0; i < len4; i++) {
         const int i0 = len4 + i, i1 = len4 - i - 1;
         TXComplex src1 = { z[i1].im, z[i1].re };
@@ -1374,6 +1402,7 @@ static void TX_NAME(ff_tx_mdct_inv)(AVTXContext *s, void *_dst, void *_src,
         CMUL(z[i1].re, z[i0].im, src1.re, src1.im, exp[i1].im, exp[i1].re);
         CMUL(z[i0].re, z[i1].im, src0.re, src0.im, exp[i0].im, exp[i0].re);
     }
+#endif
 }
 
 static const FFTXCodelet TX_NAME(ff_tx_mdct_fwd_def) = {

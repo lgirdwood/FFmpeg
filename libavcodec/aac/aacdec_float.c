@@ -95,6 +95,105 @@ static const float cce_scale[] = {
 #include "libavcodec/arm/aac.h"
 #endif
 
+/*
+ * SOF/aphid: this silicon has NO scalar HW-FP; a scalar `float` multiply is
+ * soft-float (~thousands of ccount). The plain-codebook dequant below normally
+ * multiplies each coefficient inline by the band scalefactor -> dominated loud
+ * frames (~8000 ccount/coeff). When the VFPU vector_fmul_scalar override is
+ * present, define the VMULn helpers to only GATHER the codebook value (applying
+ * sign via an integer xor on the float bit-pattern, no float arithmetic); the
+ * uniform per-band scale is then applied once via ac->fdsp->vector_fmul_scalar
+ * in decode_spectrum_and_dequant (see aacdec_proc_template.c). Algebraically
+ * bit-exact: (+-v)*s == +-(v*s). Mirrors what the escape codebook already does.
+ */
+#if defined(__has_include)
+#  if __has_include(<xtensa/config/core-isa.h>)
+#    include <xtensa/config/core-isa.h>
+#  endif
+#endif
+#if !defined(__XCC__) && defined(__has_builtin) && \
+    __has_builtin(__builtin_xtensa_mul_sx2) && \
+    defined(XCHAL_HAVE_HIFI4_VFPU) && XCHAL_HAVE_HIFI4_VFPU
+#  define FF_AAC_VFPU_DEQUANT 1
+
+/*
+ * Bit-exact scalar float multiply via the HiFi4 VFPU. This silicon has no
+ * scalar HW-FP, so a plain `a*b` becomes a soft-float __mulsf3 call (~8000
+ * ccount). Route it through one 2-lane XT_MUL_SX2 and read lane 0: the VFPU
+ * lane is IEEE-754 single, round-to-nearest, so the result is bit-identical to
+ * the scalar multiply while costing a few cycles instead of thousands. Used by
+ * apply_tns (aacdec_dsp_template.c), whose recursive AR filter must keep its
+ * exact per-tap summation order (so it can't be a wider vector reduction).
+ */
+#if defined(__has_include) && __has_include(<xtensahifiintrin.h>)
+#  include <xtensahifiintrin.h>
+#endif
+static inline float ff_vfpu_smul(float a, float b)
+{
+    float __attribute__((aligned(8))) aa[2] = { a, a };
+    float __attribute__((aligned(8))) bb[2] = { b, b };
+    float __attribute__((aligned(8))) rr[2];
+    ae_int32x2 va = AE_L32X2_I((const ae_int32x2 *)aa, 0);
+    ae_int32x2 vb = AE_L32X2_I((const ae_int32x2 *)bb, 0);
+    AE_S32X2_I(XT_MUL_SX2(va, vb), (ae_int32x2 *)rr, 0);
+    return rr[0];
+}
+
+static inline float *VMUL2(float *dst, const float *v, unsigned idx,
+                           const float *scale)
+{
+    (void)scale;
+    *dst++ = v[idx    & 15];
+    *dst++ = v[idx>>4 & 15];
+    return dst;
+}
+#define VMUL2 VMUL2
+
+static inline float *VMUL4(float *dst, const float *v, unsigned idx,
+                           const float *scale)
+{
+    (void)scale;
+    *dst++ = v[idx    & 3];
+    *dst++ = v[idx>>2 & 3];
+    *dst++ = v[idx>>4 & 3];
+    *dst++ = v[idx>>6 & 3];
+    return dst;
+}
+#define VMUL4 VMUL4
+
+static inline float *VMUL2S(float *dst, const float *v, unsigned idx,
+                            unsigned sign, const float *scale)
+{
+    union av_intfloat32 t0, t1;
+    (void)scale;
+    t0.f = v[idx    & 15];
+    t1.f = v[idx>>4 & 15];
+    t0.i ^= sign >> 1 << 31;
+    t1.i ^= sign      << 31;
+    *dst++ = t0.f;
+    *dst++ = t1.f;
+    return dst;
+}
+#define VMUL2S VMUL2S
+
+static inline float *VMUL4S(float *dst, const float *v, unsigned idx,
+                            unsigned sign, const float *scale)
+{
+    unsigned nz = idx >> 12;
+    union av_intfloat32 t;
+    (void)scale;
+    t.f = v[idx    & 3]; t.i ^= sign & 1U<<31; *dst++ = t.f;
+    sign <<= nz & 1; nz >>= 1;
+    t.f = v[idx>>2 & 3]; t.i ^= sign & 1U<<31; *dst++ = t.f;
+    sign <<= nz & 1; nz >>= 1;
+    t.f = v[idx>>4 & 3]; t.i ^= sign & 1U<<31; *dst++ = t.f;
+    sign <<= nz & 1;
+    t.f = v[idx>>6 & 3]; t.i ^= sign & 1U<<31; *dst++ = t.f;
+    return dst;
+}
+#define VMUL4S VMUL4S
+#endif /* FF_AAC_VFPU_DEQUANT */
+
 #ifndef VMUL2
 static inline float *VMUL2(float *dst, const float *v, unsigned idx,
                            const float *scale)
