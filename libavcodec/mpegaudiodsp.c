@@ -99,6 +99,8 @@ av_cold void ff_mpadsp_init(MPADSPContext *s)
     ff_mpadsp_init_ppc(s);
 #elif ARCH_X86
     ff_mpadsp_init_x86(s);
+#elif ARCH_XTENSA
+    ff_mpadsp_init_xtensa(s);
 #endif
 #if HAVE_MIPSFPU
     ff_mpadsp_init_mipsfpu(s);
