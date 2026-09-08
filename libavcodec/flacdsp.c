@@ -156,5 +156,7 @@ av_cold void ff_flacdsp_init(FLACDSPContext *c, enum AVSampleFormat fmt, int cha
     ff_flacdsp_init_riscv(c, fmt, channels);
 #elif ARCH_X86
     ff_flacdsp_init_x86(c, fmt, channels);
+#elif ARCH_XTENSA
+    ff_flacdsp_init_xtensa(c, fmt, channels);
 #endif
 }
