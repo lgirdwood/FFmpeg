@@ -162,6 +162,7 @@ AVFixedDSPContext * avpriv_alloc_fixed_dsp(int strict);
 
 void ff_fixed_dsp_init_riscv(AVFixedDSPContext *fdsp);
 void ff_fixed_dsp_init_x86(AVFixedDSPContext *fdsp);
+void ff_fixed_dsp_init_xtensa(AVFixedDSPContext *fdsp);
 
 /**
  * Calculate the square root
