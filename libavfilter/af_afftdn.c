@@ -141,6 +141,8 @@ typedef struct AudioFFTDeNoiseContext {
 
     int    *bin2band;
     double *window;
+    float  *window_flt;
+    float  *inv_window_flt;
     double *band_alpha;
     double *band_beta;
 
@@ -372,17 +374,22 @@ static void process_frame(AVFilterContext *ctx,
         double sqr_new_gain, new_gain, power, mag, mag_abs_var, new_mag_abs_var;
 
         switch (s->format) {
-        case AV_SAMPLE_FMT_FLTP:
-            noisy_data[i] = mag = hypot(fft_data_flt[i].re, fft_data_flt[i].im);
+        case AV_SAMPLE_FMT_FLTP: {
+            float re = fft_data_flt[i].re;
+            float im = fft_data_flt[i].im;
+            float p = re * re + im * im;
+            power = p;
+            noisy_data[i] = mag = sqrtf(p);
             break;
+        }
         case AV_SAMPLE_FMT_DBLP:
             noisy_data[i] = mag = hypot(fft_data_dbl[i].re, fft_data_dbl[i].im);
+            power = mag * mag;
             break;
         default:
             av_assert2(0);
         }
 
-        power = mag * mag;
         mag_abs_var = power / abs_var[i];
         new_mag_abs_var = ratio * prior[i] + rratio * fmax(mag_abs_var - 1.0, 0.0);
         new_gain = new_mag_abs_var / (1.0 + new_mag_abs_var);
@@ -431,15 +438,29 @@ static void process_frame(AVFilterContext *ctx,
     for (int i = 0; i < s->bin_count; i++)
         dnch->amt[i] = band_amt[bin2band[i]];
 
-    for (int i = 0; i < s->bin_count; i++) {
-        if (dnch->amt[i] > abs_var[i]) {
-            gain[i] = 1.0;
-        } else if (dnch->amt[i] > dnch->min_abs_var[i]) {
-            const double limit = sqrt(abs_var[i] / dnch->amt[i]);
+    if (s->format == AV_SAMPLE_FMT_FLTP) {
+        for (int i = 0; i < s->bin_count; i++) {
+            if (dnch->amt[i] > abs_var[i]) {
+                gain[i] = 1.0;
+            } else if (dnch->amt[i] > dnch->min_abs_var[i]) {
+                const double limit = sqrtf((float)(abs_var[i] / dnch->amt[i]));
 
-            gain[i] = limit_gain(gain[i], limit);
-        } else {
-            gain[i] = limit_gain(gain[i], dnch->max_gain);
+                gain[i] = limit_gain(gain[i], limit);
+            } else {
+                gain[i] = limit_gain(gain[i], dnch->max_gain);
+            }
+        }
+    } else {
+        for (int i = 0; i < s->bin_count; i++) {
+            if (dnch->amt[i] > abs_var[i]) {
+                gain[i] = 1.0;
+            } else if (dnch->amt[i] > dnch->min_abs_var[i]) {
+                const double limit = sqrt(abs_var[i] / dnch->amt[i]);
+
+                gain[i] = limit_gain(gain[i], limit);
+            } else {
+                gain[i] = limit_gain(gain[i], dnch->max_gain);
+            }
         }
     }
 
@@ -464,14 +485,31 @@ static void process_frame(AVFilterContext *ctx,
     }
 
     switch (s->format) {
-    case AV_SAMPLE_FMT_FLTP:
-        for (int i = 0; i < s->bin_count; i++) {
+    case AV_SAMPLE_FMT_FLTP: {
+        int i = 0;
+        for (; i + 4 <= s->bin_count; i += 4) {
+            float g0 = smoothed_gain[i];
+            float g1 = smoothed_gain[i + 1];
+            float g2 = smoothed_gain[i + 2];
+            float g3 = smoothed_gain[i + 3];
+
+            fft_data_flt[i].re *= g0;
+            fft_data_flt[i].im *= g0;
+            fft_data_flt[i + 1].re *= g1;
+            fft_data_flt[i + 1].im *= g1;
+            fft_data_flt[i + 2].re *= g2;
+            fft_data_flt[i + 2].im *= g2;
+            fft_data_flt[i + 3].re *= g3;
+            fft_data_flt[i + 3].im *= g3;
+        }
+        for (; i < s->bin_count; i++) {
             const float new_gain = smoothed_gain[i];
 
             fft_data_flt[i].re *= new_gain;
             fft_data_flt[i].im *= new_gain;
         }
         break;
+    }
     case AV_SAMPLE_FMT_DBLP:
         for (int i = 0; i < s->bin_count; i++) {
             const double new_gain = smoothed_gain[i];
@@ -703,8 +741,10 @@ static int config_input(AVFilterLink *inlink)
             s->matrix_c[i++] = pow(j, k);
 
     s->window = av_calloc(s->window_length, sizeof(*s->window));
+    s->window_flt = av_calloc(s->window_length, sizeof(*s->window_flt));
+    s->inv_window_flt = av_calloc(s->window_length, sizeof(*s->inv_window_flt));
     s->bin2band = av_calloc(s->bin_count, sizeof(*s->bin2band));
-    if (!s->window || !s->bin2band)
+    if (!s->window || !s->window_flt || !s->inv_window_flt || !s->bin2band)
         return AVERROR(ENOMEM);
 
     sdiv = s->band_multiplier;
@@ -865,6 +905,8 @@ static int config_input(AVFilterLink *inlink)
         double d10 = sin(i * M_PI / s->window_length);
         d10 *= wscale * d10;
         s->window[i] = d10;
+        s->window_flt[i] = (float)(d10 * (1LL << 23));
+        s->inv_window_flt[i] = (float)(d10 / (1LL << 23));
         sum += d10 * d10;
     }
 
@@ -921,7 +963,7 @@ static void sample_noise_block(AudioFFTDeNoiseContext *s,
     switch (s->format) {
     case AV_SAMPLE_FMT_FLTP:
         for (int i = 0; i < s->window_length; i++)
-            fft_in_flt[i] = s->window[i] * src_flt[i] * (1LL << 23);
+            fft_in_flt[i] = s->window_flt[i] * src_flt[i];
 
         for (int i = s->window_length; i < s->fft_length2; i++)
             fft_in_flt[i] = 0.f;
@@ -1066,7 +1108,7 @@ static int filter_channel(AVFilterContext *ctx, void *arg, int jobnr, int nb_job
         switch (s->format) {
         case AV_SAMPLE_FMT_FLTP:
             for (int m = 0; m < window_length; m++)
-                fft_in_flt[m] = window[m] * src_flt[m] * (1LL << 23);
+                fft_in_flt[m] = s->window_flt[m] * src_flt[m];
 
             for (int m = window_length; m < s->fft_length2; m++)
                 fft_in_flt[m] = 0.f;
@@ -1092,7 +1134,7 @@ static int filter_channel(AVFilterContext *ctx, void *arg, int jobnr, int nb_job
         switch (s->format) {
         case AV_SAMPLE_FMT_FLTP:
             for (int m = 0; m < window_length; m++)
-                dst[m] += s->window[m] * fft_in_flt[m] / (1LL << 23);
+                dst[m] += s->inv_window_flt[m] * fft_in_flt[m];
             break;
         case AV_SAMPLE_FMT_DBLP:
             for (int m = 0; m < window_length; m++)
@@ -1298,6 +1340,8 @@ static av_cold void uninit(AVFilterContext *ctx)
     AudioFFTDeNoiseContext *s = ctx->priv;
 
     av_freep(&s->window);
+    av_freep(&s->window_flt);
+    av_freep(&s->inv_window_flt);
     av_freep(&s->bin2band);
     av_freep(&s->band_alpha);
     av_freep(&s->band_beta);
